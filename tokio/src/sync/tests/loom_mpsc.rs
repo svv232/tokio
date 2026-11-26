@@ -247,6 +247,50 @@ fn array_nonempty_after_send() {
 }
 
 #[test]
+#[cfg(tokio_unstable)]
+fn array_reuse_after_receive() {
+    loom::model(|| {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(1).unwrap();
+
+        let sender = thread::spawn(move || {
+            // Reusing the only slot must wait until the receiver has finished
+            // reading the first value and clearing its ready bit.
+            block_on(tx.send(2)).unwrap();
+        });
+
+        assert_eq!(block_on(rx.recv()), Some(1));
+        assert_eq!(block_on(rx.recv()), Some(2));
+        sender.join().unwrap();
+    });
+}
+
+#[test]
+#[cfg(tokio_unstable)]
+fn array_close_after_wrap() {
+    loom::model(|| {
+        let (tx, mut rx) = mpsc::channel(2);
+        // Put both positions immediately before the two-lap wrap boundary,
+        // without adding threads to the model's concurrent region.
+        for value in 0..3 {
+            tx.try_send(value).unwrap();
+            assert_eq!(rx.try_recv(), Ok(value));
+        }
+
+        let sender = thread::spawn(move || {
+            tx.try_send(3).unwrap();
+            drop(tx);
+        });
+
+        // Closing the final sender must not hide a message whose claim wraps
+        // the tail position back to zero.
+        assert_eq!(block_on(rx.recv()), Some(3));
+        assert_eq!(block_on(rx.recv()), None);
+        sender.join().unwrap();
+    });
+}
+
+#[test]
 fn is_empty_during_close() {
     loom::model(|| {
         let (tx, rx) = mpsc::channel::<()>(1);
